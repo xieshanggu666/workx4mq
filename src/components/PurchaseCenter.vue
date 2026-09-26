@@ -320,7 +320,7 @@ function newPoForAfterSale(a) {
   form.reason = `售后缺货补发履约（售后单 ${a.id}）：补货用于继续补发并恢复库存`
   form.afterSaleId = a.id
 }
-function submitPo() {
+async function submitPo() {
   const payload = {
     targetType: form.targetType,
     activityId: form.targetType === 'prize' ? (form.prizeKey || '').split('::')[0] : null,
@@ -331,7 +331,7 @@ function submitPo() {
     reason: form.reason,
     afterSaleId: form.afterSaleId || undefined
   }
-  const po = store.createPurchaseOrder(payload)
+  const po = await store.createPurchaseOrder(payload)
   if (po) {
     resetForm()
     showCreate.value = false
@@ -342,8 +342,8 @@ function submitPo() {
 // —— 审批 / 撤销 / 验收 ——
 const notes = reactive({})
 const noteOf = (o) => (notes[o.id] || (notes[o.id] = { note: '' }))
-function approve(o, ok) {
-  if (store.reviewPurchaseOrder(o.id, ok, noteOf(o).note)) notes[o.id].note = ''
+async function approve(o, ok) {
+  if (await store.reviewPurchaseOrder(o.id, ok, noteOf(o).note)) notes[o.id].note = ''
 }
 function canCancel(o) {
   const me = store.currentMemberId || store.user.id
@@ -358,9 +358,9 @@ const batches = reactive({})
 const batchOf = (o) => (batches[o.id] || (batches[o.id] = {
   qty: o.qty - o.inboundQty, deliveredQty: undefined, carrier: '', note: '', closeShortage: false
 }))
-function doInbound(o) {
+async function doInbound(o) {
   const f = batchOf(o)
-  if (store.inboundPurchase(o.id, {
+  if (await store.inboundPurchase(o.id, {
     qty: f.qty, deliveredQty: f.deliveredQty, carrier: f.carrier, note: f.note,
     closeShortage: f.closeShortage
   })) {

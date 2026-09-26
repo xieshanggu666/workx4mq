@@ -276,8 +276,8 @@ const statusMeta = (s) => RISK_STATUS[s] || { label: s, tone: '' }
 const rarityLabel = (r) => PRIZE_RARITY[r]?.label || r
 const rarityColor = (r) => PRIZE_RARITY[r]?.color || '#777'
 
-function submitAppeal(o) {
-  if (store.appealRisk(o.id, appealDrafts[o.id] || '')) {
+async function submitAppeal(o) {
+  if (await store.appealRisk(o.id, appealDrafts[o.id] || '')) {
     appealDrafts[o.id] = ''
   }
 }

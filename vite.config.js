@@ -11,6 +11,11 @@ export default defineConfig({
   },
   server: {
     port: 5174,
-    open: false
+    open: false,
+    // 联机模式：前端 /api 与 /health 代理到履约服务端（npm run server，默认 8080）
+    proxy: {
+      '/api': { target: 'http://localhost:8080', changeOrigin: true },
+      '/health': { target: 'http://localhost:8080', changeOrigin: true }
+    }
   }
 })

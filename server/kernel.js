@@ -118,6 +118,13 @@ export class Kernel {
         if (!st[e.table].some((r) => r.id === e.row.id)) st[e.table].push(e.row)
         break
       }
+      case 'remove': {
+        // 行删除（活动配置删除等）；重放幂等：不存在则跳过
+        const list = st[e.table]
+        const i = list.findIndex((r) => r.id === e.id)
+        if (i >= 0) list.splice(i, 1)
+        break
+      }
       case 'points.post': {
         // 幂等：同一 effectId 的积分记账只生效一次（崩溃重放/故障续办不重复扣分发奖）
         if (e.effectId) {

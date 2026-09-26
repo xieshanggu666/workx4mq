@@ -193,10 +193,18 @@ export class MigrationService {
       couponLogs: (row) => ({ ...row, date: dayOfTs(row.ts, row.date) }),
       auditLogs: (row) => ({ ...row, date: dayOfTs(row.logTs || row.ts, row.date) }),
       stockAdjustments: (row) => ({ ...row, bizDate: row.bizDate, date: dayOfTs(row.ts, row.date) }),
-      reconBills: (row) => ({ ...row, date: row.date, createdAt: row.createdAt })
+      reconBills: (row) => ({ ...row, date: row.date, createdAt: row.createdAt }),
+      // 离线快照扩展台账（web-offline-snapshot 来源）：采购/验收/供应商/预算，固定 id 直插
+      purchaseOrders: (row) => ({ ...row }),
+      inboundBatches: (row) => ({ ...row }),
+      acceptDiffs: (row) => ({ ...row }),
+      supplierBills: (row) => ({ ...row }),
+      budgets: (row) => ({ ...row }),
+      budgetLedger: (row) => ({ ...row })
     }
     const copyTables = ['records', 'riskOrders', 'taskClaims', 'coupons', 'couponLogs',
-      'shipments', 'afterSales', 'reconBills', 'stockAdjustments', 'auditLogs']
+      'shipments', 'afterSales', 'reconBills', 'stockAdjustments', 'auditLogs',
+      'purchaseOrders', 'inboundBatches', 'acceptDiffs', 'supplierBills', 'budgets', 'budgetLedger']
     copyTables.forEach((table) => {
       ;(snap[table] || []).forEach((row0) => {
         const row = dateTables[table] ? dateTables[table](JSON.parse(JSON.stringify(row0))) : JSON.parse(JSON.stringify(row0))
@@ -228,7 +236,11 @@ export class MigrationService {
         shipments: (snap.shipments || []).length,
         afterSales: (snap.afterSales || []).length,
         reconBills: (snap.reconBills || []).length,
-        auditLogs: (snap.auditLogs || []).length
+        auditLogs: (snap.auditLogs || []).length,
+        purchaseOrders: (snap.purchaseOrders || []).length,
+        supplierBills: (snap.supplierBills || []).length,
+        budgets: (snap.budgets || []).length,
+        budgetLedger: (snap.budgetLedger || []).length
       },
       balances: Object.fromEntries(
         [...new Set(flows.map((p) => p.userId || 'legacy'))].map((uid) => [uid, this.k.state.balances[uid] || 0])

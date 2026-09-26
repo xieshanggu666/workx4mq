@@ -121,7 +121,7 @@ const rarityColor = (r) => PRIZE_RARITY[r]?.color || '#777'
 // 实物/虚拟：显式 physical 标记优先，兜底按奖品名
 const isPhysical = (p) => (p.physical !== undefined ? !!p.physical : !p.name.includes('积分'))
 
-function submit() {
+async function submit() {
   const prizes = form.value.prizeText
     .split('\n')
     .map((l) => l.trim())
@@ -130,7 +130,7 @@ function submit() {
       const [name, rarity = 'common', stock = 10, weight = 10] = l.split('|').map((x) => x.trim())
       return { name, rarity, stock: Number(stock) || 10, weight: Number(weight) || 10, emoji: PRIZE_RARITY[rarity]?.icon || '🎁' }
     })
-  const act = store.createActivity({
+  const act = await store.createActivity({
     name: form.value.name || '未命名活动',
     type: form.value.type,
     costType: form.value.costType,
@@ -139,6 +139,7 @@ function submit() {
     desc: form.value.desc,
     prizes
   })
+  if (!act) return // 服务端/权限校验已拦截并 toast
   showForm.value = false
   form.value = { name: '', type: 'wheel', costType: 'free', cost: 10, dailyLimit: 3, desc: '', prizeText: '' }
 }

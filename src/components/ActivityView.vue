@@ -118,10 +118,10 @@ const frozenCount = computed(() =>
     r.status === 'frozen').length
 )
 
-function onDraw() {
+async function onDraw() {
   frozenResult.value = null
-  // 提前校验（可抽则执行）
-  const rec = store.draw(props.activity.id)
+  // 提前校验（可抽则执行）；联机模式走服务端交易 Saga（幂等键 + 锁内库存校验）
+  const rec = await store.draw(props.activity.id)
   if (!rec) return  // 已被校验拦截并 toast
   // 命中风控：不揭晓奖品，展示审核提示
   if (rec.status === 'frozen') {

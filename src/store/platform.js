@@ -5,6 +5,7 @@ import {
   PERMISSION_GROUPS, PERMISSION_LABELS, CUSTOMER, CLOUD_COUPONS
 } from '@/mock/tenant'
 import { CLOUD_ACTIVITIES, CLOUD_GOODS } from '@/mock/cloud-data'
+import * as remote from '@/api/remote'
 
 // 加权随机抽取（按权重选一个奖品下标）
 function drawByWeight(prizes) {
@@ -269,7 +270,11 @@ export const usePlatformStore = defineStore('platform', {
     identityKind: 'customer',   // customer | staff | platform：当前登录身份
     activeTenantId: 't-star',   // 当前数据上下文租户（客户"逛店"切换 / 员工归属租户 / 平台方可任意切换）
     currentMemberId: '',        // 员工身份下的成员 id
-    lastDenied: null            // 最近一次权限/越权拦截（供 UI 提示与测试断言）
+    lastDenied: null,           // 最近一次权限/越权拦截（供 UI 提示与测试断言）
+    // ===== 服务端联机 =====
+    connMode: 'local',          // local 本地离线（纯前端台账）| server 已接入服务端（API + WAL 投影水合）
+    connInfo: null,             // 最近一次成功联机信息 { at }
+    offlineDirty: false         // 本地存在未迁移上链的离线操作（离线快照待迁移）
   }),
 
   getters: {
@@ -950,6 +955,32 @@ export const usePlatformStore = defineStore('platform', {
       this.seedRiskData()
     },
 
+    // ===== 服务端联机（统一租户权限/幂等/并发/WAL 恢复） =====
+    // 启动时后台探测服务端：成功则切换 server 模式（全部写操作走 API，状态以服务端投影水合）；
+    // 失败保持 local 离线模式（本地台账 + 离线快照持久化，恢复后可迁移上链）。
+    async autoConnect(opts = {}) {
+      return remote.connectServer(this, { silent: true, ...opts })
+    },
+    // 顶栏手动重连（离线 → 联机）
+    async retryConnect() {
+      const ok = await remote.connectServer(this, { silent: false })
+      if (ok && this.offlineDirty) {
+        this.showToast('🌐 已恢复联机：检测到有离线快照待迁移，可在顶栏一键迁移上链', 'info')
+      }
+      return ok
+    },
+    // 离线快照迁移上链（需平台超管身份）
+    async migrateOfflineSnapshot() {
+      return remote.migrateOfflineSnapshot(this)
+    },
+    // 离线持久化（仅 local 模式由 $subscribe 触发）
+    persistOffline() {
+      if (this.connMode === 'local') remote.persistOfflineSnapshot(this)
+    },
+    restoreOfflineSnapshot() {
+      return remote.restorePersistedSnapshot(this)
+    },
+
     // ===== 统一业务日切换 =====
     // 所有按日重置/统计的唯一入口：业务动作前、定时器轮询、页面重新可见时调用。
     // 跨日处理：
@@ -957,6 +988,12 @@ export const usePlatformStore = defineStore('platform', {
     //  - 刷新 todayDate：每日限抽、风控当日频次从新日期起算
     //  - 保留累计抽奖次数、积分余额/流水，以及审核中（pending/appealed）单据的冻结积分与预占库存，支持跨日审核
     syncBusinessDay(showHint = false) {
+      // 联机模式：业务日以服务端业务时钟为准（含虚拟业务日/跨日审核），本地不自行推日；
+      // 定时轮询退化为防抖刷新，保证多客户端并发下看到同一 WAL 投影。
+      if (this.connMode === 'server') {
+        remote.scheduleRefresh(this)
+        return false
+      }
       // 先做卡券到期扫描（每个业务动作都经过本入口，保证出示/核销前已过期券状态已流转）
       this.sweepCouponExpiry(true)
       const current = todayStr()
@@ -1031,6 +1068,7 @@ export const usePlatformStore = defineStore('platform', {
     },
     // 员工登录（成员选择 / 模拟登录）：停用账号被拒绝并写拒绝审计；登录成功才切换身份
     loginAsMember(memberId, opts = {}) {
+      if (this.connMode === 'server') return remote.loginAsMember(this, memberId, opts)
       const m = this.members.find((x) => x.id === memberId)
       if (!m) {
         this.deny('login-denied', '成员不存在，登录被拒绝', { module: 'auth' })
@@ -1060,6 +1098,7 @@ export const usePlatformStore = defineStore('platform', {
     },
     // 切回消费者
     loginAsCustomer(opts = {}) {
+      if (this.connMode === 'server') return remote.loginAsCustomer(this, opts)
       this.identityKind = 'customer'
       this.currentMemberId = ''
       this.role = 'user'
@@ -1073,6 +1112,7 @@ export const usePlatformStore = defineStore('platform', {
     },
     // 切换数据上下文租户：消费者可"逛店"切换；员工仅可在本租户内（越权拒绝留痕）；平台方任意切换
     switchTenant(tenantId) {
+      if (this.connMode === 'server') return remote.switchTenant(this, tenantId)
       const t = this.tenants.find((x) => x.id === tenantId)
       if (!t || t.status !== 'active') {
         this.deny('tenant-denied', `租户不可用（${t?.name || tenantId}），切换被拒绝`, { module: 'auth' })
@@ -1364,6 +1404,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // ===== 抽奖 =====
     draw(activityId) {
+      if (this.connMode === 'server') return remote.draw(this, activityId)
       this.syncBusinessDay()
       const trace = this.beginTrace()
       const act = this.activities.find((a) => a.id === activityId)
@@ -1532,6 +1573,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // ===== 任务 =====
     completeTask(taskId) {
+      if (this.connMode === 'server') return remote.completeTask(this, taskId)
       this.syncBusinessDay()
       const t = this.tasks.find((x) => x.id === taskId)
       if (!t || t.claimed) return
@@ -1570,6 +1612,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // ===== 商城兑换 =====
     redeem(goodsId) {
+      if (this.connMode === 'server') return remote.redeem(this, goodsId)
       this.syncBusinessDay()
       const trace = this.beginTrace()
       const traceId = trace
@@ -1722,6 +1765,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 用户申诉（仅本人、且单据处于待审核/已申诉可补充）
     appealRisk(orderId, reason) {
+      if (this.connMode === 'server') return remote.appealRisk(this, orderId, reason)
       this.syncBusinessDay()
       const trace = this.beginTrace()
       const o = this.riskOrders.find((x) => x.id === orderId)
@@ -1757,6 +1801,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 运营放行（幂等：仅 pending/appealed 可处理；RBAC：risk:review；数据隔离：仅本租户单）
     releaseRisk(orderId, note = '') {
+      if (this.connMode === 'server') return remote.reviewRisk(this, orderId, 'release', note)
       this.syncBusinessDay()
       const trace = this.beginTrace()
       const traceId = trace
@@ -1828,6 +1873,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 运营撤销：返还积分、回补库存、业务记录作废（幂等；RBAC：risk:review）
     revokeRisk(orderId, note = '') {
+      if (this.connMode === 'server') return remote.reviewRisk(this, orderId, 'revoke', note)
       this.syncBusinessDay()
       const trace = this.beginTrace()
       const traceId = trace
@@ -1953,6 +1999,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 用户填写 / 更新收货信息（仅本人；发货前可修改，提交后进入运营待发货队列）
     submitShipAddress(shipmentId, form) {
+      if (this.connMode === 'server') return remote.submitShipAddress(this, shipmentId, form)
       this.syncBusinessDay()
       const trace = this.beginTrace()
       const o = this.shipments.find((x) => x.id === shipmentId)
@@ -1997,6 +2044,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 运营接单发货（RBAC：ship:send；仅本租户、仅 to_ship，幂等防重复发货）
     shipShipment(shipmentId, form) {
+      if (this.connMode === 'server') return remote.shipShipment(this, shipmentId, form)
       const trace = this.beginTrace()
       const o = this.shipments.find((x) => x.id === shipmentId)
       if (!o) { this.endTrace(); return false }
@@ -2048,6 +2096,7 @@ export const usePlatformStore = defineStore('platform', {
     // 同步快递轨迹：发货后每次同步向下推进一个节点（幂等：已到签收终态不再推进；退回/已收货单不推进）
     // RBAC：员工需 ship:trace；客户仅可同步本人订单
     syncShipmentTrace(shipmentId) {
+      if (this.connMode === 'server') return remote.syncShipmentTrace(this, shipmentId)
       this.syncBusinessDay()
       const trace = this.beginTrace()
       const o = this.shipments.find((x) => x.id === shipmentId)
@@ -2085,6 +2134,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 用户确认收货（仅本人、仅已发货可确认）
     receiveShipment(shipmentId) {
+      if (this.connMode === 'server') return remote.receiveShipment(this, shipmentId)
       const trace = this.beginTrace()
       const o = this.shipments.find((x) => x.id === shipmentId)
       if (!o) { this.endTrace(); return false }
@@ -2145,6 +2195,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 用户申请售后（仅本人；类型与发货单状态匹配；同一发货单已有待审核单则幂等拦截）
     applyAfterSale(shipmentId, type, reason) {
+      if (this.connMode === 'server') return remote.applyAfterSale(this, shipmentId, type, reason)
       this.syncBusinessDay()
       const trace = this.beginTrace()
       const o = this.shipments.find((x) => x.id === shipmentId)
@@ -2215,6 +2266,7 @@ export const usePlatformStore = defineStore('platform', {
     // RBAC：aftersale:review；数据隔离：仅本租户售后单
     // 补发缺货：售后单转为 waiting_stock 待补货（同样不落账），采购验收入库后可从待处理售后继续履约
     reviewAfterSale(afterSaleId, approve, note = '') {
+      if (this.connMode === 'server') return remote.reviewAfterSale(this, afterSaleId, approve, note)
       this.syncBusinessDay()
       const trace = this.beginTrace()
       const traceId = trace
@@ -2415,6 +2467,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 运营发起采购申请（RBAC：purchase:apply；仅本租户奖品/商品；数量校验）
     createPurchaseOrder(form) {
+      if (this.connMode === 'server') return remote.createPurchaseOrder(this, form)
       this.syncBusinessDay()
       const trace = this.beginTrace()
       const traceId = trace
@@ -2512,6 +2565,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 申请人在审批前撤销采购单（幂等：仅 pending；仅发起人本人或管理员；不动库存）
     cancelPurchaseOrder(poId) {
+      if (this.connMode === 'server') return remote.cancelPurchaseOrder(this, poId)
       const trace = this.beginTrace()
       const traceId = trace
       const po = this.purchaseOrders.find((x) => x.id === poId)
@@ -2541,6 +2595,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 采购审批（RBAC：purchase:approve；仅本租户、仅 pending；通过不产生库存变动，入库以验收批次为准）
     reviewPurchaseOrder(poId, approve, note = '') {
+      if (this.connMode === 'server') return remote.reviewPurchaseOrder(this, poId, approve, note)
       const trace = this.beginTrace()
       const traceId = trace
       const po = this.purchaseOrders.find((x) => x.id === poId)
@@ -2585,6 +2640,7 @@ export const usePlatformStore = defineStore('platform', {
     // 每批合格量：remain += qty、stock += qty，追加 append-only 验收批次与验收差异；
     // 累计入满 → received 终态；差异结案 → diff_closed 终态；关联待补货售后时提示可继续履约（不自动代审）。
     inboundPurchase(poId, form = {}) {
+      if (this.connMode === 'server') return remote.inboundPurchase(this, poId, form)
       this.syncBusinessDay()
       const trace = this.beginTrace()
       const po = this.purchaseOrders.find((x) => x.id === poId)
@@ -2778,6 +2834,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 运营按采购单拟供应商账单（RBAC：supplier:bill；仅入满/差异结案；一张 PO 至多一张有效账单）
     createSupplierBill(poId, form = {}) {
+      if (this.connMode === 'server') return remote.createSupplierBill(this, poId, form)
       this.syncBusinessDay()
       const trace = this.beginTrace()
       if (!this.requirePerm('supplier:bill', 'supplier')) { this.endTrace(); return null }
@@ -2841,6 +2898,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 草稿/被驳回账单：运营修改后提交（或保存草稿）
     submitSupplierBill(billId, form = {}) {
+      if (this.connMode === 'server') return remote.submitSupplierBill(this, billId, form)
       const bill = this._requireBill(billId)
       if (!bill) return null
       return this.createSupplierBill(bill.poId, { ...form, submit: true })
@@ -2848,6 +2906,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 财务复核（RBAC：supplier:review；reviewing → approved/rejected；不改账）
     reviewSupplierBill(billId, approve, note = '') {
+      if (this.connMode === 'server') return remote.reviewSupplierBill(this, billId, approve, note)
       const trace = this.beginTrace()
       const bill0 = this._requireBill(billId)
       if (!bill0) { this.endTrace(); return false }
@@ -2887,6 +2946,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 财务结算（RBAC：supplier:settle；approved → settled；按采购批次与售后补发回写库存对账快照，留痕归档）
     settleSupplierBill(billId, note = '') {
+      if (this.connMode === 'server') return remote.settleSupplierBill(this, billId, note)
       this.syncBusinessDay()
       const trace = this.beginTrace()
       const traceId = trace
@@ -3205,6 +3265,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 运营编制预算（RBAC：budget:manage；一口径一币种同时仅一张生效/待审批/冻结预算）
     createBudget(form) {
+      if (this.connMode === 'server') return remote.createBudget(this, form)
       this.syncBusinessDay()
       const trace = this.beginTrace()
       if (!this.requirePerm('budget:manage', 'budget')) { this.endTrace(); return null }
@@ -3254,6 +3315,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 财务审批预算（RBAC：budget:approve；pending → active/rejected）
     reviewBudget(budgetId, approve, note = '') {
+      if (this.connMode === 'server') return remote.reviewBudget(this, budgetId, approve, note)
       const trace = this.beginTrace()
       const b = this.budgets.find((x) => x.id === budgetId)
       if (!b) { this.endTrace(); return false }
@@ -3276,6 +3338,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 申请人撤销待审批预算
     cancelBudget(budgetId) {
+      if (this.connMode === 'server') return remote.cancelBudget(this, budgetId)
       const trace = this.beginTrace()
       const b = this.budgets.find((x) => x.id === budgetId)
       if (!b) { this.endTrace(); return false }
@@ -3299,6 +3362,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 财务冻结/解冻预算（冻结期新增支出一律拦截，已发生占用保留）
     setBudgetFrozen(budgetId, frozen, note = '') {
+      if (this.connMode === 'server') return remote.setBudgetFrozen(this, budgetId, frozen, note)
       const trace = this.beginTrace()
       const b = this.budgets.find((x) => x.id === budgetId)
       if (!b) { this.endTrace(); return false }
@@ -3321,6 +3385,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 财务关闭预算（终态；历史占用台账保留）
     closeBudget(budgetId, note = '') {
+      if (this.connMode === 'server') return remote.closeBudget(this, budgetId, note)
       const trace = this.beginTrace()
       const b = this.budgets.find((x) => x.id === budgetId)
       if (!b) { this.endTrace(); return false }
@@ -3341,6 +3406,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 预算调整申请（运营；append-only 留痕，审批通过后才改额度）
     requestBudgetAdjust(budgetId, delta, reason) {
+      if (this.connMode === 'server') return remote.requestBudgetAdjust(this, budgetId, delta, reason)
       this.syncBusinessDay()
       const trace = this.beginTrace()
       const b = this.budgets.find((x) => x.id === budgetId)
@@ -3372,6 +3438,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 财务审批预算调整
     reviewBudgetAdjust(budgetId, adjustId, approve, note = '') {
+      if (this.connMode === 'server') return remote.reviewBudgetAdjust(this, budgetId, adjustId, approve, note)
       const trace = this.beginTrace()
       const b = this.budgets.find((x) => x.id === budgetId)
       if (!b) { this.endTrace(); return false }
@@ -3556,6 +3623,7 @@ export const usePlatformStore = defineStore('platform', {
     // 运营按券码核销：校验归属/状态/有效期，状态机幂等防重复核销
     // RBAC：coupon:redeem；数据隔离：仅可核销当前数据上下文租户的券（跨租户券码视为不存在并留痕）
     redeemCoupon(code, form = {}) {
+      if (this.connMode === 'server') return remote.redeemCoupon(this, code, form)
       this.syncBusinessDay() // 核销前先做到期流转
       const trace = this.beginTrace()
       if (!this.requirePerm('coupon:redeem', 'coupon')) { this.endTrace(); return null }
@@ -3631,6 +3699,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 更新风控规则（RBAC：risk:rule；仅本租户规则，不影响其他租户的抽奖/兑换判定）
     updateRiskRules(patch) {
+      if (this.connMode === 'server') return remote.updateRiskRules(this, patch)
       if (!this.requirePerm('risk:rule', 'risk')) return false
       const trace = this.beginTrace()
       const tid = this.activeTenantId
@@ -4068,6 +4137,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 执行对账（一租户一业务日一张单；历史日不触发业务日切换/兜底结算）
     runRecon(date, silent = false, tenantId = this.activeTenantId) {
+      if (this.connMode === 'server') return remote.runRecon(this, date || this.todayDate, silent, tenantId)
       if ((date === this.todayDate || !date) && tenantId === this.activeTenantId) this.syncBusinessDay()
       const d = date || this.todayDate
       const tid = tenantId
@@ -4121,6 +4191,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 运营复核差异单（RBAC：recon:review；仅本租户；不改动任何账目）
     reviewRecon(date, note = '', tenantId = this.activeTenantId) {
+      if (this.connMode === 'server') return remote.reviewRecon(this, date, note, tenantId)
       const tid = tenantId
       const trace = this.beginTrace()
       if (!this.requirePerm('recon:review', 'recon') || !this.requireSameTenant(tid, 'recon')) {
@@ -4144,6 +4215,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // 复核通过后补偿：只追加补偿流水/库存校正，同步余额、库存；重复执行对已平项幂等跳过（RBAC：recon:compensate）
     compensateRecon(date, note = '', tenantId = this.activeTenantId) {
+      if (this.connMode === 'server') return remote.compensateRecon(this, date, note, tenantId)
       const tid = tenantId
       const trace = this.beginTrace()
       if (!this.requirePerm('recon:compensate', 'recon') || !this.requireSameTenant(tid, 'recon')) {
@@ -4325,6 +4397,7 @@ export const usePlatformStore = defineStore('platform', {
 
     // ===== 活动运营管理（RBAC：activity:manage；仅本租户活动） =====
     toggleActivityStatus(id) {
+      if (this.connMode === 'server') return remote.toggleActivityStatus(this, id)
       const trace = this.beginTrace()
       const a = this.activities.find((x) => x.id === id)
       if (!a) { this.endTrace(); return }
@@ -4340,6 +4413,7 @@ export const usePlatformStore = defineStore('platform', {
       this.endTrace()
     },
     resetActivityStock(id) {
+      if (this.connMode === 'server') return remote.resetActivityStock(this, id)
       const trace = this.beginTrace()
       const a = this.activities.find((x) => x.id === id)
       if (!a) { this.endTrace(); return }
@@ -4354,6 +4428,7 @@ export const usePlatformStore = defineStore('platform', {
       this.endTrace()
     },
     deleteActivity(id) {
+      if (this.connMode === 'server') return remote.deleteActivity(this, id)
       const trace = this.beginTrace()
       const a = this.activities.find((x) => x.id === id)
       if (!a) { this.endTrace(); return false }
@@ -4368,6 +4443,7 @@ export const usePlatformStore = defineStore('platform', {
       return true
     },
     createActivity(payload) {
+      if (this.connMode === 'server') return remote.createActivity(this, payload)
       const trace = this.beginTrace()
       if (!this.requirePerm('activity:manage', 'activity')) { this.endTrace(); return null }
       const tid = this.activeTenantId

@@ -368,16 +368,16 @@ const reconLogs = computed(() =>
     (l.tenantId || 't-star') === reconTenantId.value && l.action.startsWith('recon-'))
 )
 
-function runSelected() {
-  store.runRecon(selectedDate.value, false, reconTenantId.value)
+async function runSelected() {
+  await store.runRecon(selectedDate.value, false, reconTenantId.value)
   reviewDraft.value = ''
   compDraft.value = ''
 }
-function doReview() {
-  if (store.reviewRecon(selectedDate.value, reviewDraft.value, reconTenantId.value)) reviewDraft.value = ''
+async function doReview() {
+  if (await store.reviewRecon(selectedDate.value, reviewDraft.value, reconTenantId.value)) reviewDraft.value = ''
 }
-function doCompensate() {
-  store.compensateRecon(selectedDate.value, compDraft.value, reconTenantId.value)
+async function doCompensate() {
+  await store.compensateRecon(selectedDate.value, compDraft.value, reconTenantId.value)
   compDraft.value = ''
 }
 function injectGap() {

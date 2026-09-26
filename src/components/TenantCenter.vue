@@ -270,9 +270,9 @@ function permCount(m) {
   if (perms.has('*')) return m.tenantId ? '全部' : '平台全部'
   return perms.size
 }
-function quickLogin(id) {
-  store.loginAsMember(id)
-  if (store.currentMember?.tenantId) store.switchTenant(store.currentMember.tenantId)
+async function quickLogin(id) {
+  const ok = await store.loginAsMember(id)
+  if (ok !== false && store.currentMember?.tenantId) await store.switchTenant(store.currentMember.tenantId)
 }
 
 // 新增成员

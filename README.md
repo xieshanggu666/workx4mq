@@ -58,8 +58,23 @@
 ```bash
 npm install
 npm run dev
-# 打开 http://localhost:5174
+# 打开 http://localhost:5174（纯前端离线模式即可浏览运行）
 ```
+
+### 联机模式（前端接入服务端 API）
+
+```bash
+npm run server            # 终端 1：履约服务端（WAL 事件库，默认 :8080）
+npm run dev               # 终端 2：前端（/api 经 vite 代理到 :8080）
+# 顶栏徽标变为「🌐 服务端联机」即已接入；未检测到服务端时保持「📴 本地离线」
+```
+
+- **写操作全部走服务端**：活动、积分、库存、风控、物流、采购、供应商结算、预算、卡券、对账等 41 个 store 动作在联机后统一改走 REST API，本地不再落账；每次写后由 `GET /api/bootstrap` 全量水合服务端 WAL 投影（多客户端并发看到同一真实源）。
+- **统一租户权限**：会话 token（`Authorization: Bearer`）随请求下发，RBAC 权限位 + tenantId 归属在服务端强制校验；越权/停用/跨租户写 `result=denied` 审计并同步到前端 `lastDenied`。
+- **幂等**：客户端为每笔写自动生成 `idempotencyKey`（双击/重试/断网重发由服务端 idem 表去重）；积分流水 `(kind,refId)`、库存/预算 `effectId` 兜底。
+- **并发**：服务端 `KeyedLock` 按键互斥（积分户/商品/活动/预算），锁内二次校验，并发不超卖、不超预算。
+- **WAL 恢复**：写前日志 + 状态投影 + Saga `processing` 锚点，崩溃重启自动续办到终态；前端业务日以服务端业务时钟为准。
+- **离线快照迁移**：离线模式下全部本地变更防抖持久化到 localStorage（断网/刷新可续跑）；恢复联机后顶栏出现「⬆️ 迁移离线快照」，平台超管一键把本地台账快照经 `POST /api/migration/run` 校验并重建上链（行级固定 id + 批次 manifest 幂等，重跑零增量；已有业务数据的服务端拒绝新批次，防双计）。迁移目标库用 `npm run server:fresh`（`--no-seed`，仅组织/权限种子）启动。
 
 ## 服务端履约链路（交易 · 积分 · 库存 · 风控协作）
 
@@ -67,9 +82,11 @@ npm run dev
 
 ```bash
 npm run server            # node server/index.js --port 8080 --db data/server-wal.jsonl
+npm run server:fresh      # 迁移目标库模式（--no-seed：仅组织/权限种子，等待离线快照迁移导入）
 npm run test:server       # 服务内核：并发不超卖 / 幂等 / 崩溃续办 / 跨日审核 / P1–P6 对账补偿 / RBAC / 采购入库 / 供应商结算闭环
 npm run test:migration    # 历史台账迁移：校验 → 迁移 → 对账补偿 → 重跑幂等
 npm run test:http         # HTTP E2E：真实起服，token 鉴权 / REST / 采购+供应商结算 API / 故障注入重启续办
+npm run test:front-server # 前端↔服务端联机：真实 store 经 API 全链路（水合/幂等/RBAC/跨租户/预算/并发/WAL 重启/离线快照迁移/降级）
 ```
 
 ### 架构与关键设计
@@ -112,14 +129,16 @@ server/
 | 类别 | 接口 |
 | --- | --- |
 | 鉴权 | `POST /api/auth/customer-login`、`/member-login`、`/switch-tenant`、`/logout` |
-| 查询 | `GET /api/me`、`/dashboard`、`/activities`、`/goods`、`/points`、`/records`、`/coupons/my`、`/shipments`、`/aftersales`、`/risk/orders` |
-| 交易 | `POST /api/draw`、`/api/redeem`（body 带 `idempotencyKey`） |
+| 查询 | `GET /api/me`、`/bootstrap`（前端联机水合：身份/租户作用域全量投影）、`/dashboard`、`/activities`、`/goods`、`/points`、`/records`、`/coupons/my`、`/shipments`、`/aftersales`、`/risk/orders` |
+| 交易 | `POST /api/draw`、`/api/redeem`（body 带 `idempotencyKey`）、`/api/tasks/complete`（手动任务领奖，台账幂等） |
 | 风控 | `POST /api/risk/appeal`、`/risk/review`（action=release/revoke）、`/risk/rules` |
 | 履约 | `POST /api/shipments/address|send|receive|trace`、`/aftersales/apply|review`、`/coupons/redeem` |
+| 活动管理 | `POST /api/activities`（新建）、`/activities/status`（启停）、`/activities/reset-stock`（重置库存）、`/activities/delete` |
 | 采购入库 | `GET /api/purchases`、`POST /api/purchases/create|review|cancel|inbound`（inbound 支持 deliveredQty/closeShortage 差异登记） |
 | 供应商结算 | `GET /api/supplier/bills`、`/api/supplier/recon`、`POST /api/supplier/bills/create|submit|review|settle` |
 | 预算成本 | `GET /api/budgets`、`/api/budgets/ledger`、`/api/budgets/dashboard`，`POST /api/budgets/create|review|cancel|freeze|activate|close|adjust|adjust-review` |
 | 对账 | `POST /api/recon/run`、`/recon/diffs`、`/recon/review`、`/recon/compensate` |
+| 离线迁移 | `GET /api/migrations`、`POST /api/migration/run`（仅平台超管；仅空库或同批次幂等重放，非空库 409 防双计） |
 | 平台运维 | `POST /api/admin/fault`（故障注入）、`/admin/resume`（续办）、`/admin/day`（跨日，仅平台超管） |
 
 ## 项目结构
@@ -138,7 +157,10 @@ lottery-platform/
     │   ├── tenant.js           # 租户/角色目录/权限位/成员/云雀卡券模板
     │   └── cloud-data.js       # 第二租户云雀数科：活动/商品 mock
     ├── store/
-    │   └── platform.js         # Pinia：多租户身份/RBAC、抽奖/积分/风控/物流/卡券/对账/审计
+    │   └── platform.js         # Pinia：多租户身份/RBAC、抽奖/积分/风控/物流/卡券/对账/审计（联机后写操作改走服务端）
+    ├── api/
+    │   ├── client.js           # API 客户端：Bearer token、幂等键注入、错误归一、健康探测（浏览器/Node 同构）
+    │   └── remote.js           # 联机层：connect/bootstrap 水合、41 个远程动作、离线快照导出/持久化/迁移上链
     └── components/
         ├── ActivityView.vue    # 活动详情（奖品池 + 玩法区 + 风控冻结提示）
         ├── LuckWheel.vue       # 幸运转盘动画

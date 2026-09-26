@@ -407,8 +407,8 @@ const addrForm = (o) => {
 }
 // 当前展开内联编辑的订单（仅 to_ship 阶段用户主动修改时使用）
 const editingId = ref('')
-function submitAddr(o) {
-  if (store.submitShipAddress(o.id, addrForm(o))) {
+async function submitAddr(o) {
+  if (await store.submitShipAddress(o.id, addrForm(o))) {
     editingId.value = ''
     userFilter.value = 'to_ship'
   }
@@ -454,10 +454,10 @@ function toggleApply(o, type) {
   applyForm[o.id].type = applyForm[o.id].type === type ? '' : type
   applyForm[o.id].reason = ''
 }
-function submitAfterSale(o) {
+async function submitAfterSale(o) {
   const f = applyForm[o.id]
   if (!f || !f.type) return
-  if (store.applyAfterSale(o.id, f.type, f.reason)) {
+  if (await store.applyAfterSale(o.id, f.type, f.reason)) {
     applyForm[o.id] = { type: '', reason: '' }
   }
 }
@@ -482,9 +482,9 @@ const ensureShipForm = (o) => {
   if (!shipForms[o.id]) shipForms[o.id] = { carrier: '', trackingNo: '', note: '' }
   return shipForms[o.id]
 }
-function doShip(o) {
+async function doShip(o) {
   const form = ensureShipForm(o)
-  if (store.shipShipment(o.id, form)) {
+  if (await store.shipShipment(o.id, form)) {
     shipForms[o.id] = { carrier: '', trackingNo: '', note: '' }
   }
 }
@@ -509,8 +509,8 @@ const reviewNoteOf = (a) => {
   if (!reviewNotes[a.id]) reviewNotes[a.id] = { note: '' }
   return reviewNotes[a.id]
 }
-function review(a, approve) {
-  if (store.reviewAfterSale(a.id, approve, reviewNoteOf(a).note)) {
+async function review(a, approve) {
+  if (await store.reviewAfterSale(a.id, approve, reviewNoteOf(a).note)) {
     reviewNotes[a.id].note = ''
   }
 }

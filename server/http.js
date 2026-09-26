@@ -3,7 +3,7 @@
 // 写接口在服务层强制 RBAC 权限位 + tenantId 归属校验；所有写操作走交易 Saga，天然幂等/可续办。
 import http from 'node:http'
 import { URL } from 'node:url'
-import { BizError } from './util.js'
+import { BizError, genId } from './util.js'
 import { DEMO_USERS } from './seed.js'
 import { PERMISSION_LABELS } from './mock-perms.js'
 
@@ -100,6 +100,10 @@ async function route(app, req, res, json) {
 
   // —— 查询类 ——
   if (method === 'GET' && p === '/api/me') return json(res, 200, { session: publicSession(session) })
+  // 前端联机水合：一次性返回当前身份/租户作用域内的全部业务投影（WAL 重放后的服务端真实状态）
+  if (method === 'GET' && p === '/api/bootstrap') {
+    return json(res, 200, bootstrap(app, session))
+  }
   if (method === 'GET' && p === '/api/dashboard') {
     return json(res, 200, dashboard(app, tid()))
   }
@@ -372,6 +376,95 @@ async function route(app, req, res, json) {
     const row = await createActivity(app, body, session)
     return json(res, 200, { ok: true, activity: row })
   }
+  if (method === 'POST' && p === '/api/activities/status') {
+    await requireStaffPerm(app, session, PERMS.activityManage)
+    const a = app.k.state.activities.find((x) => x.id === body.activityId)
+    if (!a) throw new BizError('ACT_NOT_FOUND', '活动不存在', 404)
+    await app.auth.requireSameTenant(session, a.tenantId, 'activity')
+    const map = { running: 'paused', paused: 'running', ended: 'running' }
+    const next = { ...a, status: map[a.status] || 'running' }
+    await app.k.commit([{ type: 'upsert', table: 'activities', row: next }])
+    await app.audit.log('activity-toggle', a.id,
+      `活动【${a.name}】状态变更为${next.status === 'running' ? '运行中' : next.status === 'paused' ? '已暂停' : '已结束'}`,
+      { tenantId: a.tenantId, ctx: session, module: 'activity' })
+    return json(res, 200, { ok: true, activity: next })
+  }
+  if (method === 'POST' && p === '/api/activities/reset-stock') {
+    await requireStaffPerm(app, session, PERMS.activityManage)
+    const a = app.k.state.activities.find((x) => x.id === body.activityId)
+    if (!a) throw new BizError('ACT_NOT_FOUND', '活动不存在', 404)
+    await app.auth.requireSameTenant(session, a.tenantId, 'activity')
+    // 重置时不动审核中预占的库存：remain 恢复为 总库存 - 冻结预占（与前端本地口径一致）
+    const next = { ...a, prizes: a.prizes.map((p) => ({ ...p, remain: p.stock - (p.frozen || 0) })) }
+    await app.k.commit([{ type: 'upsert', table: 'activities', row: next }])
+    await app.audit.log('activity-stock-reset', a.id, `活动【${a.name}】奖品库存重置（风控预占保留）`,
+      { tenantId: a.tenantId, ctx: session, module: 'activity' })
+    return json(res, 200, { ok: true, activity: next })
+  }
+  if (method === 'POST' && p === '/api/activities/delete') {
+    await requireStaffPerm(app, session, PERMS.activityManage)
+    const a = app.k.state.activities.find((x) => x.id === body.activityId)
+    if (!a) throw new BizError('ACT_NOT_FOUND', '活动不存在', 404)
+    await app.auth.requireSameTenant(session, a.tenantId, 'activity')
+    await app.k.commit([{ type: 'remove', table: 'activities', id: a.id }])
+    await app.audit.log('activity-delete', a.id, `删除活动【${a.name}】（配置删除，历史业务记录保留）`,
+      { tenantId: a.tenantId, ctx: session, module: 'activity' })
+    return json(res, 200, { ok: true, removed: a.id })
+  }
+  // 手动任务（每日签到/观看/分享/一次性任务）领取：抽奖任务由交易链路自动结算，禁止手动领取。
+  // 幂等：日任务按 任务×业务日×用户 判重；一次性任务按 任务×用户 判重（taskClaims 台账）。
+  if (method === 'POST' && p === '/api/tasks/complete') {
+    const t = app.k.state.tasks.find((x) => x.id === body.taskId)
+    if (!t) throw new BizError('TASK_NOT_FOUND', '任务不存在', 404)
+    if (t.metric === 'draw') throw new BizError('TASK_AUTO', '抽奖任务按真实参与记录自动结算，达标后自动发奖', 400)
+    const tenantId = tid()
+    const date = app.k.todayDate()
+    const dup = app.k.state.taskClaims.some((c) => c.taskId === t.id && c.userId === session.userId &&
+      (c.tenantId || 't-star') === tenantId && (t.type === 'once' || c.bizDate === date))
+    if (dup) throw new BizError('TASK_CLAIMED', '该任务已领取，请勿重复操作', 409)
+    const claimId = genId('tc')
+    // 营销预算实时占用：任务积分奖励（租户积分预算，超额/冻结整笔阻断，effectId 幂等）
+    await app.budget.occupy('settle',
+      { unit: 'points', amount: t.reward, scopeType: 'tenant', scopeId: tenantId },
+      { category: 'points', kind: 'task-reward', refType: 'task-claim', refId: claimId, bizNo: t.label,
+        summary: `任务奖励：${t.label} +${t.reward} 积分`, tenantId, userId: session.userId },
+      { name: session.name, userId: session.userId, tenantId })
+    const { flow } = await app.points.post({
+      userId: session.userId, delta: t.reward, note: `完成任务：${t.label}`,
+      kind: 'reward', tenantId, bizDate: date, refId: claimId, refType: 'task-manual'
+    })
+    const claim = {
+      id: claimId, taskId: t.id, taskLabel: t.label, reward: t.reward,
+      userId: session.userId, tenantId, bizDate: date, grantDate: date,
+      time: app.k.nowTime(), ts: app.k.nowTs(), source: 'manual', flowId: flow.id
+    }
+    await app.k.commit([{ type: 'insert', table: 'taskClaims', row: claim }])
+    await app.audit.log('task-claim', claimId, `用户【${session.name}】完成任务【${t.label}】，发放 ${t.reward} 积分`,
+      { tenantId, ctx: session, module: 'points' })
+    return json(res, 200, { ok: true, claim })
+  }
+
+  // —— 离线快照迁移（仅平台超管）：前端离线模式产生的本地台账快照，校验后重建为服务端事件 ——
+  if (method === 'GET' && p === '/api/migrations') {
+    if (session.identityKind !== 'platform') throw new BizError('FORBIDDEN', '仅平台方可查看迁移批次', 403)
+    return json(res, 200, { migrations: app.k.state.migrations })
+  }
+  if (method === 'POST' && p === '/api/migration/run') {
+    if (session.identityKind !== 'platform') throw new BizError('FORBIDDEN', '仅平台超管可执行离线快照迁移', 403)
+    const snap = body.snapshot || body
+    if (!snap || typeof snap !== 'object') throw new BizError('BAD_FORM', '缺少快照内容', 400)
+    // 守卫：迁移只允许导入「无业务数据的库」（防止与既有台账双计余额/库存）；
+    // 同批次 manifest 已存在时放行（中断重跑/重复提交幂等零增量）。
+    const batchId = `mig-${snap.source || 'legacy'}-${snap.migratedAt || 'all'}`
+    const dup = app.k.state.migrations.find((m) => m.id === batchId)
+    const hasBusiness = app.k.state.records.length > 0 || app.k.state.pointFlows.length > 0 || app.k.state.coupons.length > 0
+    if (hasBusiness && !dup) {
+      throw new BizError('MIGRATION_NOT_EMPTY',
+        '目标服务端已存在业务数据：离线快照迁移仅允许导入空库（--no-seed 启动）或同批次幂等重放', 409)
+    }
+    const r = await app.migration.run(snap, { ctx: session })
+    return json(res, 200, { ok: true, ...r })
+  }
 
   // —— 写：营销预算与成本控制 ——
   if (method === 'POST' && p === '/api/budgets/create') {
@@ -456,6 +549,60 @@ function publicSession(s) {
   return {
     identityKind: s.identityKind, memberId: s.memberId, userId: s.userId,
     name: s.name, tenantId: s.tenantId
+  }
+}
+
+// 前端联机水合快照：按会话身份与当前数据上下文租户做作用域裁剪。
+//  - 消费者：可见全部活跃租户（"逛店"），业务记录/物流/卡券/积分流水仅本人；
+//  - 员工：锁定归属租户，可见本租户全部业务投影与成员目录；
+//  - 平台超管：跨租户巡检，可见全部。
+// 业务日一律以服务端业务时钟为准（跨日审核/虚拟业务日场景前端不得自行推日）。
+function bootstrap(app, session) {
+  const tid = session.tenantId || 't-star'
+  const isCustomer = session.identityKind === 'customer'
+  const isPlatform = session.identityKind === 'platform'
+  const st = app.k.state
+  const visibleTenants = st.tenants.filter((t) =>
+    (isCustomer || isPlatform) ? t.status === 'active' : t.id === tid)
+  const tids = new Set(visibleTenants.map((t) => t.id))
+  const inVisible = (x) => tids.has(x.tenantId || 't-star')
+  const inT = (x) => (x.tenantId || 't-star') === tid
+  const mine = (x) => x.userId === session.userId
+  // 业务投影：消费者看本人（跨可见租户），员工/平台看当前上下文租户
+  const scoped = (arr) => arr.filter((x) => (isCustomer ? inVisible(x) && mine(x) : inT(x)))
+  const canAudit = isPlatform || app.auth.can(session, 'audit:view')
+  const flows = isCustomer
+    ? st.pointFlows.filter((f) => inVisible(f) && mine(f))
+    : st.pointFlows.filter(inT)
+  return {
+    session: publicSession(session),
+    todayDate: app.k.todayDate(),
+    tenants: visibleTenants,
+    members: st.members.filter((m) => !m.tenantId || tids.has(m.tenantId)),
+    customRoles: st.customRoles.filter((r) => tids.has(r.tenantId)),
+    activities: st.activities.filter((a) => tids.has(a.tenantId)),
+    goods: st.goods.filter(inVisible),
+    tasks: st.tasks,
+    pointsBalance: st.balances[session.userId] || 0,
+    pointRecords: flows.slice(-500),
+    records: scoped(st.records).slice(-500),
+    riskOrders: scoped(st.riskOrders),
+    riskRulesByTenant: Object.fromEntries(
+      [...tids].map((t) => [t, st.riskRules[t] || null]).filter(([, v]) => v)),
+    shipments: scoped(st.shipments),
+    afterSales: scoped(st.afterSales),
+    coupons: scoped(st.coupons),
+    couponLogs: isCustomer ? st.couponLogs.filter((l) => inVisible(l) && mine(l)) : st.couponLogs.filter(inT),
+    taskClaims: scoped(st.taskClaims),
+    purchaseOrders: isCustomer ? [] : st.purchaseOrders.filter(inT),
+    inboundBatches: isCustomer ? [] : st.inboundBatches.filter(inT),
+    acceptDiffs: isCustomer ? [] : st.acceptDiffs.filter(inT),
+    supplierBills: isCustomer ? [] : st.supplierBills.filter(inT),
+    budgets: isCustomer ? [] : st.budgets.filter(inT),
+    budgetLedger: isCustomer ? [] : st.budgetLedger.filter(inT),
+    reconBills: isCustomer ? [] : st.reconBills.filter(inT),
+    stockAdjustments: isCustomer ? [] : st.stockAdjustments.filter(inT),
+    auditLogs: canAudit ? st.auditLogs.filter(inVisible).slice(-500) : []
   }
 }
 

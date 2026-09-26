@@ -241,12 +241,12 @@ function openBillForm(r) {
   billFormTarget.value = { poId: r.poId, targetName: r.targetName, poNo: r.poNo }
   billNote.value = ''
 }
-function saveDraft() {
-  const b = store.createSupplierBill(billFormTarget.value.poId, { note: billNote.value, submit: false })
+async function saveDraft() {
+  const b = await store.createSupplierBill(billFormTarget.value.poId, { note: billNote.value, submit: false })
   if (b) { billFormTarget.value = null; filter.value = 'draft' }
 }
-function submitBill() {
-  const b = store.createSupplierBill(billFormTarget.value.poId, { note: billNote.value, submit: true })
+async function submitBill() {
+  const b = await store.createSupplierBill(billFormTarget.value.poId, { note: billNote.value, submit: true })
   if (b) { billFormTarget.value = null; filter.value = 'reviewing' }
 }
 
@@ -273,14 +273,14 @@ function resubmit(b) {
 }
 const reviewNotes = reactive({})
 const reviewNoteOf = (b) => (reviewNotes[b.id] || (reviewNotes[b.id] = { note: '' }))
-function review(b, ok) {
-  if (store.reviewSupplierBill(b.id, ok, reviewNoteOf(b).note)) reviewNotes[b.id].note = ''
+async function review(b, ok) {
+  if (await store.reviewSupplierBill(b.id, ok, reviewNoteOf(b).note)) reviewNotes[b.id].note = ''
 }
 const settleNotes = reactive({})
 const settleNoteOf = (b) => (settleNotes[b.id] || (settleNotes[b.id] = { note: '' }))
-function settlePay(b) {
+async function settlePay(b) {
   const note = settleNoteOf(b).note
-  const r = store.settleSupplierBill(b.id, note)
+  const r = await store.settleSupplierBill(b.id, note)
   if (r) { settleNotes[b.id].note = ''; filter.value = 'settled' }
 }
 </script>

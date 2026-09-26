@@ -267,10 +267,10 @@ const codeInput = ref('')
 function quickFill(code) {
   codeInput.value = code
 }
-function doRedeem() {
+async function doRedeem() {
   const code = codeInput.value.trim()
   if (!code) { store.showToast('请输入券码', 'warn'); return }
-  const r = store.redeemCoupon(code, { channel: '到店扫码', note: '' })
+  const r = await store.redeemCoupon(code, { channel: '到店扫码', note: '' })
   if (r?.coupon && !r.duplicated && !r.expired) codeInput.value = ''
 }
 

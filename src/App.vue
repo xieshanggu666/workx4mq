@@ -22,6 +22,21 @@
         </button>
       </nav>
       <div class="user">
+        <!-- 联机状态：服务端联机（API+WAL）/ 本地离线（快照可迁移） -->
+        <button
+          class="conn-badge"
+          :class="[store.connMode, { dirty: store.offlineDirty }]"
+          :title="connTip"
+          @click="onConnClick"
+        >
+          {{ store.connMode === 'server' ? '🌐 服务端联机' : '📴 本地离线' }}{{ store.offlineDirty ? '·待迁移' : '' }}
+        </button>
+        <button
+          v-if="store.connMode === 'server' && store.offlineDirty"
+          class="migrate-btn"
+          title="把离线模式产生的本地台账快照迁移到服务端事件库（需平台超管身份）"
+          @click="store.migrateOfflineSnapshot()"
+        >⬆️ 迁移离线快照</button>
         <!-- 数据上下文租户切换（消费者"逛店"；平台超管跨租户巡检；员工锁定本租户） -->
         <div class="tenant-switch" :title="switchTitle">
           <span class="ts-label">租户</span>
@@ -175,20 +190,47 @@ const couponBadge = computed(() =>
 
 // 统一业务日切换：页面常开时定时器轮询；页面从后台重新可见时立即检查
 let dayTimer = null
-const syncDay = () => store.syncBusinessDay(true)
+let persistTimer = null
+let unsubPersist = null
+const syncDay = () => {
+  store.syncBusinessDay(true)
+  // 离线模式下静默重试联机（有待迁移离线数据时不自动覆盖本地视图，需用户手动重连）
+  if (store.connMode === 'local' && !store.offlineDirty) store.autoConnect()
+}
 const onVisibility = () => {
   if (document.visibilityState === 'visible') syncDay()
+}
+// 联机状态徽标点击：离线时手动重连
+const connTip = computed(() =>
+  store.connMode === 'server'
+    ? (store.offlineDirty ? '已接入服务端；存在未迁移的离线快照，可点击「迁移离线快照」上链' : '已接入服务端：写操作走服务端 API（RBAC/幂等/并发/WAL 恢复）')
+    : (store.offlineDirty ? '本地离线模式，存在未迁移离线数据；点击尝试重连服务端' : '本地离线模式（纯前端台账）；点击尝试连接服务端')
+)
+const onConnClick = () => {
+  if (store.connMode === 'local') store.retryConnect()
 }
 
 onMounted(() => {
   store.init()
+  // 离线续跑：存在本地离线快照则先恢复（联机成功后仍可一键迁移上链）
+  store.restoreOfflineSnapshot()
   if (store.activities.length) currentActivityId.value = store.activities[0].id
+  // 后台探测服务端并联机（失败则保持本地离线模式）
+  store.autoConnect()
+  // 离线模式下本地变更防抖持久化到离线快照（localStorage）
+  unsubPersist = store.$subscribe(() => {
+    if (store.connMode !== 'local') return
+    if (persistTimer) clearTimeout(persistTimer)
+    persistTimer = setTimeout(() => store.persistOffline(), 400)
+  })
   dayTimer = setInterval(syncDay, 30 * 1000)
   document.addEventListener('visibilitychange', onVisibility)
 })
 
 onBeforeUnmount(() => {
   if (dayTimer) clearInterval(dayTimer)
+  if (persistTimer) clearTimeout(persistTimer)
+  if (unsubPersist) unsubPersist()
   document.removeEventListener('visibilitychange', onVisibility)
 })
 </script>
@@ -273,6 +315,19 @@ onBeforeUnmount(() => {
   width: 30px; height: 30px; border-radius: 50%; cursor: pointer; font-size: 14px;
 }
 .identity-btn.on { background: rgba(255,152,0,0.18); border-color: rgba(255,152,0,0.5); }
+
+.conn-badge {
+  background: #13233f; border: 1px solid rgba(120,160,220,0.25); color: #8ba2c8;
+  border-radius: 12px; padding: 4px 10px; font-size: 11px; font-weight: 600; cursor: pointer;
+}
+.conn-badge.server { background: rgba(67,160,71,0.16); border-color: rgba(67,160,71,0.5); color: #a5d6a7; }
+.conn-badge.local { background: rgba(255,152,0,0.12); border-color: rgba(255,152,0,0.4); color: #ffcc80; }
+.conn-badge.dirty { border-style: dashed; }
+.migrate-btn {
+  background: linear-gradient(135deg,#00897b,#26a69a); color: #fff; border: none;
+  border-radius: 12px; padding: 4px 10px; font-size: 11px; font-weight: 700; cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0,137,123,0.4);
+}
 
 .content { max-width: 1200px; margin: 0 auto; padding: 24px; }
 .activity-switch { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }

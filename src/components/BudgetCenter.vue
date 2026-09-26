@@ -283,8 +283,8 @@ function openForm() {
   Object.assign(form, emptyForm())
   showForm.value = true
 }
-function submitForm() {
-  const r = store.createBudget({
+async function submitForm() {
+  const r = await store.createBudget({
     scopeType: form.scopeType, scopeId: form.scopeType, unit: form.unit,
     amount: form.amount, startDate: form.startDate, endDate: form.endDate,
     name: form.name, purpose: form.purpose
@@ -315,9 +315,9 @@ function openAdjust(b) {
   adjustingId[b.id] = true
   adjustForms[b.id] = { delta: null, reason: '' }
 }
-function submitAdjust(b) {
+async function submitAdjust(b) {
   const f = adjustForms[b.id]
-  const r = store.requestBudgetAdjust(b.id, f.delta, f.reason)
+  const r = await store.requestBudgetAdjust(b.id, f.delta, f.reason)
   if (r) adjustingId[b.id] = false
 }
 const pendingAdjusts = (b) => (b.adjustments || []).filter((a) => a.status === 'pending')

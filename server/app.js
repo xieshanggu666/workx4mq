@@ -40,10 +40,12 @@ export async function createApp(options = {}) {
 
   const app = { k, locks, auth, audit, points, inventory, coupons, ship, purchase, supplier, budget, tasks, risk, trade, recon, migration }
 
-  // 空库引导：写入原生种子（以 upsert/insert 事件入 WAL，重启自动恢复）
+  // 空库引导：写入原生种子（以 upsert/insert 事件入 WAL，重启自动恢复）。
+  // options.seed === false：完全空库；options.seed === 'org'：仅组织/权限/任务/卡券模板种子
+  // （迁移目标库模式：活动/商品/预算/余额等业务数据一律由离线快照迁移导入，避免双计）。
   const fresh = k.state.tenants.length === 0 && k.state.activities.length === 0
   if (fresh && options.seed !== false) {
-    await seedFresh(k)
+    await seedFresh(k, { orgOnly: options.seed === 'org' })
   }
 
   // 启动续办：崩溃后重放 WAL，把 processing 的交易/审核单执行到终态（幂等无重复副作用）。
@@ -61,7 +63,7 @@ export async function createApp(options = {}) {
   return app
 }
 
-async function seedFresh(k) {
+async function seedFresh(k, { orgOnly = false } = {}) {
   const seed = buildSeed()
   const events = []
   seed.tenants.forEach((t) => events.push({ type: 'upsert', table: 'tenants', row: t }))
@@ -69,12 +71,15 @@ async function seedFresh(k) {
   seed.customRoles.forEach((r) => events.push({ type: 'upsert', table: 'customRoles', row: r }))
   seed.tasks.forEach((t) => events.push({ type: 'upsert', table: 'tasks', row: t }))
   seed.couponTpls.forEach((c) => events.push({ type: 'upsert', table: 'couponTpls', row: c }))
-  seed.activities.forEach((a) => events.push({ type: 'upsert', table: 'activities', row: a }))
-  seed.goods.forEach((g) => events.push({ type: 'upsert', table: 'goods', row: g }))
-  ;(seed.budgets || []).forEach((b) => events.push({ type: 'upsert', table: 'budgets', row: b }))
+  if (!orgOnly) {
+    seed.activities.forEach((a) => events.push({ type: 'upsert', table: 'activities', row: a }))
+    seed.goods.forEach((g) => events.push({ type: 'upsert', table: 'goods', row: g }))
+    ;(seed.budgets || []).forEach((b) => events.push({ type: 'upsert', table: 'budgets', row: b }))
+  }
   Object.entries({ 't-star': makeDefaultRules(), 't-cloud': makeDefaultRules() })
     .forEach(([tenantId, rules]) => events.push({ type: 'risk-rules.put', tenantId, rules }))
   for (const e of events) await k.commit([e])
+  if (orgOnly) return // 迁移目标库：不写入业务种子与分户余额，等待快照迁移
   // 分户初始余额（以一笔初始充值流水入账，保持余额链从 0 可重放）
   for (const [userId, amount] of Object.entries(seed.balances)) {
     const flow = {

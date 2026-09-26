@@ -22,6 +22,14 @@
         </button>
       </nav>
       <div class="user">
+        <!-- 服务端履约模式指示：在线/同步中/离线；点击进入组织权限页可切换或迁移 -->
+        <span class="svc-badge" :class="store.serverMode ? (store.serverConnected ? 'on' : 'wait') : 'off'"
+              :title="store.serverMode
+                ? (store.serverConnected ? '服务端履约模式：写操作走 REST（RBAC/幂等/并发/WAL）' : '正在连接/同步服务端…')
+                : '本地快照模式：点击进入「组织权限」可接入服务端或迁移离线快照'"
+              @click="tab = 'tenant'">
+          {{ store.serverMode ? (store.serverSyncing ? '☁️ 同步中' : '☁️ 服务端') : '💾 本地' }}
+        </span>
         <!-- 数据上下文租户切换（消费者"逛店"；平台超管跨租户巡检；员工锁定本租户） -->
         <div class="tenant-switch" :title="switchTitle">
           <span class="ts-label">租户</span>
@@ -175,14 +183,27 @@ const couponBadge = computed(() =>
 
 // 统一业务日切换：页面常开时定时器轮询；页面从后台重新可见时立即检查
 let dayTimer = null
-const syncDay = () => store.syncBusinessDay(true)
+const syncDay = () => { if (!store.serverMode) store.syncBusinessDay(true) }
 const onVisibility = () => {
-  if (document.visibilityState === 'visible') syncDay()
+  if (document.visibilityState === 'visible') {
+    if (store.serverMode) store.hydrateFromServer?.({ silent: true })
+    else syncDay()
+  }
 }
 
 onMounted(() => {
-  store.init()
-  if (store.activities.length) currentActivityId.value = store.activities[0].id
+  // 服务端履约模式由远程桥自动水合（本地有令牌时），跳过本地演示种子，避免闪现本地数据
+  if (!store.serverMode) {
+    store.init()
+    if (store.activities.length) currentActivityId.value = store.activities[0].id
+  } else {
+    // 水合完成后选中当前租户第一个活动
+    watch(() => store.activities.length, (n) => {
+      if (n && !store.activities.some((a) => a.id === currentActivityId.value)) {
+        currentActivityId.value = store.activities[0].id
+      }
+    }, { immediate: true })
+  }
   dayTimer = setInterval(syncDay, 30 * 1000)
   document.addEventListener('visibilitychange', onVisibility)
 })
@@ -228,6 +249,13 @@ onBeforeUnmount(() => {
   box-shadow: 0 3px 10px rgba(41,98,255,0.35);
 }
 .user { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.svc-badge {
+  font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 12px;
+  cursor: pointer; white-space: nowrap; border: 1px solid transparent;
+}
+.svc-badge.on { background: rgba(67, 160, 71, 0.18); color: #a5d6a7; border-color: rgba(67, 160, 71, 0.4); }
+.svc-badge.wait { background: rgba(255, 152, 0, 0.15); color: #ffcc80; border-color: rgba(255, 152, 0, 0.4); }
+.svc-badge.off { background: rgba(139, 162, 200, 0.12); color: #8ba2c8; border-color: rgba(120, 160, 220, 0.25); }
 .u-avatar {
   width: 32px; height: 32px; border-radius: 50%; background: #13233f;
   display: grid; place-items: center; font-size: 18px;

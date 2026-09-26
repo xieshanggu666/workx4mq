@@ -24,6 +24,9 @@
       </div>
     </div>
 
+    <!-- 服务端履约连接 / 离线快照上云 -->
+    <ServerPanel />
+
     <!-- 数据隔离说明 -->
     <div class="card iso-card">
       <div class="card-title">🔒 多租户数据隔离模型</div>
@@ -216,6 +219,7 @@
 import { ref, reactive, computed } from 'vue'
 import { usePlatformStore } from '@/store/platform'
 import { PERMISSION_GROUPS, PERMISSION_LABELS } from '@/mock/tenant'
+import ServerPanel from './ServerPanel.vue'
 
 const store = usePlatformStore()
 const permGroups = PERMISSION_GROUPS

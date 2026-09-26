@@ -121,6 +121,47 @@ server/
 | 预算成本 | `GET /api/budgets`、`/api/budgets/ledger`、`/api/budgets/dashboard`，`POST /api/budgets/create|review|cancel|freeze|activate|close|adjust|adjust-review` |
 | 对账 | `POST /api/recon/run`、`/recon/diffs`、`/recon/review`、`/recon/compensate` |
 | 平台运维 | `POST /api/admin/fault`（故障注入）、`/admin/resume`（续办）、`/admin/day`（跨日，仅平台超管） |
+| 活动运营 | `POST /api/activities/toggle|reset-stock|delete`（启停/重置库存/删除墓碑，`activity:manage`） |
+| 手动任务 | `POST /api/tasks/claim`（签到等非抽奖任务，按 任务×用户×业务日 幂等） |
+| 组织租户 | `GET /api/catalog/org`，`POST /api/org/members/create|update|role|toggle`、`/api/org/roles/create|update|delete`，`POST /api/tenants/create|toggle|update`（仅平台超管） |
+| 水合 | `GET /api/state`（全量快照，字段与前端 Pinia store 同构；按会话身份/租户/用户裁剪）、`GET /api/tasks`、`/api/coupon-logs`、`/api/stock-adjustments` |
+| 离线迁移 | `POST /api/migration/validate|run`（仅平台超管，空库上云）、`GET /api/migration/manifests` |
+
+- **统一写幂等**：所有 `POST` 写接口接受 `Idempotency-Key` 请求头（或 `body.idempotencyKey`）。同一「会话 × 方法 × 路径 × 键」24h 内重放直接返回首次成功响应，只缓存 2xx（4xx 业务拒绝可修正后重试，5xx 不缓存）。交易类 `/api/draw`、`/api/redeem` 另有业务级幂等键（Saga 内判重，重放返回 `idempotent:true`）。
+- **空库迁移部署**：`node server/index.js --no-seed` 仅引导平台超管骨架，业务台账等待离线快照经 `/api/migration/validate → run` 幂等上云。
+
+## 前端接入服务端（统一权限 / 幂等 / 并发 / WAL 恢复 / 离线迁移）
+
+前端可在「🏢 组织权限」页顶部的 **🔌 服务端履约链路** 面板一键在两种模式间切换：
+
+- **本地快照模式（默认）**：零后端，全部业务在 Pinia store 内完成，可离线浏览演示。
+- **服务端履约模式**：连接后（默认走 Vite 代理 `/api-proxy` → `http://localhost:8080`，可用 `LOTTERY_SERVER` 环境变量改向），**活动、积分、库存、风控、物流、采购、供应商、预算、对账等全部写操作改走 REST API**，本地 store 降级为服务端快照的响应式投影。
+
+实现（不改动既有 5000+ 行业务逻辑，经 Pinia 插件透明拦截）：
+
+```
+src/
+├── api/
+│   ├── client.js     # 零依赖 fetch 客户端：token 持久化、Idempotency-Key 自动生成/记忆、错误标准化、health 探测
+│   └── bridge.js     # 远程履约桥（Pinia 插件）：拦截全部写 action → REST；写后 /api/state 全量水合；
+│                     #   乐观占位（抽奖动画）+ $remote Promise 衔接；会话/租户切换；可见性变化自动重水合
+└── components/
+    └── ServerPanel.vue # 连接/断开、身份快捷登录、离线快照导出与一键上云迁移
+```
+
+统一保障如何落到前端：
+
+1. **租户权限**：每个写请求带 Bearer token；服务端强制 RBAC 权限位 + `tenantId` 归属校验，越权/停用返回 403 并写 `result=denied` 审计，前端只做即时提示、服务端为准。
+2. **幂等**：每个写操作自动生成并记忆 `Idempotency-Key`（交易类用业务幂等键）；重复点击、弱网重试、刷新后续办都只落一笔；前端另有 `rememberedIdemKey` 把键持久化到 localStorage。
+3. **并发**：server 模式不做本地预扣，库存/积分/预算的并发安全由服务端 `KeyedLock`（多键有序加锁）+ Saga 锁内二次确认保证，前端以水合快照为准，杜绝双端超卖。
+4. **WAL 恢复**：服务端崩溃重启自动重放 JSONL 并把 processing Saga 续办到终态；前端在响应返回、页面重新可见时重水合，无需知道崩溃发生过。
+5. **离线快照迁移**：本地模式可「导出离线快照」（与 `MigrationService` 同构）；连上服务端后在面板选文件，以平台超管身份经「校验（余额链/库存账实/冻结单/券码唯一）→ 固定行 id + effectId 迁移重建 WAL（中断重跑零增量）」上云，历史漏记随后由统一 P1–P7 对账补偿链路检出修正。
+
+前端冒烟：`npm run test:bridge`（全量水合字段与裁剪、统一幂等头、任务领奖幂等、活动/组织/租户 RBAC、空库离线快照迁移与批次幂等、写后水合）。
+
+### Vite 代理
+
+`npm run dev`（5174）把 `/api-proxy/*` 转发到 Node 服务端（默认 8080）；生产环境可在连接面板填服务端基址，或反向代理同源路径。
 
 ## 项目结构
 

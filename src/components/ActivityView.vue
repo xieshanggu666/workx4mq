@@ -123,6 +123,16 @@ function onDraw() {
   // 提前校验（可抽则执行）
   const rec = store.draw(props.activity.id)
   if (!rec) return  // 已被校验拦截并 toast
+  // 服务端模式：占位记录带 $remote Promise，等待服务端真实结果后再揭晓/播放（失败不揭晓）
+  if (rec?.__pending && rec.$remote) {
+    rec.$remote.then((real) => {
+      if (!real) return
+      if (real.status === 'frozen') { frozenResult.value = real; return }
+      if (props.activity.type === 'wheel') wheelRef.value?.spin()
+      else scratchResult.value = real
+    }).catch(() => { /* 错误已统一 toast */ })
+    return
+  }
   // 命中风控：不揭晓奖品，展示审核提示
   if (rec.status === 'frozen') {
     frozenResult.value = rec

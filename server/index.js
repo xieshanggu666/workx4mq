@@ -10,8 +10,10 @@ const arg = (name, def) => {
 
 const port = Number(arg('--port', process.env.PORT || 8080))
 const dbFile = arg('--db', process.env.DB_FILE || 'data/server-wal.jsonl')
+// --no-seed：空库启动（面向「离线快照迁移上云」的全新部署；库中已有数据时该开关无副作用）
+const seedFresh = process.argv.includes('--no-seed') ? false : undefined
 
-const app = await createApp({ dbFile })
+const app = await createApp({ dbFile, seed: seedFresh })
 const server = createHttpServer(app)
 
 server.listen(port, () => {

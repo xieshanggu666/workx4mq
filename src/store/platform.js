@@ -269,7 +269,17 @@ export const usePlatformStore = defineStore('platform', {
     identityKind: 'customer',   // customer | staff | platform：当前登录身份
     activeTenantId: 't-star',   // 当前数据上下文租户（客户"逛店"切换 / 员工归属租户 / 平台方可任意切换）
     currentMemberId: '',        // 员工身份下的成员 id
-    lastDenied: null            // 最近一次权限/越权拦截（供 UI 提示与测试断言）
+    lastDenied: null,           // 最近一次权限/越权拦截（供 UI 提示与测试断言）
+    // ===== 服务端履约模式（远程桥 @/api/bridge 使用）=====
+    // 本地模式（默认，零后端可浏览）下全部业务在本地 store 完成；
+    // 切到 server 模式后，写操作统一走服务端 API（RBAC/幂等/KeyedLock 并发/WAL 恢复），本 store 仅为服务端快照的响应式投影。
+    serverMode: false,          // 是否处于服务端履约模式
+    serverConnected: false,     // 服务端最近是否可达
+    serverSyncing: false,       // 是否有写操作在途/等待水合
+    serverVersion: '',          // 最近水合快照版本（可用于 stale-while-revalidate 判断）
+    _lastHydratedAt: 0,
+    _lastRemoteTrade: null,     // 最近一笔服务端交易（抽奖动画/结果提示桥用）
+    offlineMigrations: []       // 离线快照上云迁移批次记录（manifest 摘要）
   }),
 
   getters: {
@@ -5638,6 +5648,65 @@ export const usePlatformStore = defineStore('platform', {
       sorted.forEach((p) => {
         bal += p.delta
         p.balance = bal
+      })
+    },
+
+    // ===== 离线快照（本地模式 → 服务端上云迁移）=====
+    // 导出与服务端 MigrationService 同构的历史台账快照（JSON 可下载/可粘贴上云）。
+    exportOfflineSnapshot() {
+      const clone = (x) => JSON.parse(JSON.stringify(x))
+      return {
+        source: 'legacy-pinia-store@offline',
+        migratedAt: 'all',
+        exportedAt: this.todayDate,
+        tenants: clone(this.tenants),
+        members: clone(this.members.filter((m) => m.tenantId)),
+        customRoles: clone(this.customRoles),
+        tasks: clone(this.tasks),
+        riskRulesByTenant: clone(this.riskRulesByTenant),
+        activities: clone(this.activities),
+        goods: clone(this.goods),
+        pointRecords: clone(this.pointRecords),
+        records: clone(this.records),
+        riskOrders: clone(this.riskOrders),
+        taskClaims: clone(this.taskClaims),
+        coupons: clone(this.coupons),
+        couponLogs: clone(this.couponLogs),
+        shipments: clone(this.shipments),
+        afterSales: clone(this.afterSales),
+        reconBills: clone(this.reconBills),
+        stockAdjustments: clone(this.stockAdjustments),
+        budgets: clone(this.budgets),
+        budgetLedger: clone(this.budgetLedger),
+        auditLogs: clone(this.auditLogs),
+        legacyPoints: this.points,
+        legacyOwner: 'u-1001'
+      }
+    },
+
+    // 下载离线快照文件（浏览器环境）
+    downloadOfflineSnapshot() {
+      const snap = this.exportOfflineSnapshot()
+      const blob = new Blob([JSON.stringify(snap, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `lottery-offline-snapshot-${this.todayDate}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+      this.showToast('离线快照已导出，可在连上服务端后一键迁移上云', 'success')
+      return snap
+    },
+
+    // 读取本地文件为快照 JSON（返回 Promise）
+    readOfflineSnapshotFile(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => {
+          try { resolve(JSON.parse(String(reader.result))) } catch (e) { reject(e) }
+        }
+        reader.onerror = reject
+        reader.readAsText(file)
       })
     }
   }

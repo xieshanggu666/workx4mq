@@ -16,6 +16,7 @@ import { RiskService, makeDefaultRules } from './services/risk.js'
 import { TradeService } from './services/trade.js'
 import { ReconService } from './services/recon.js'
 import { MigrationService } from './services/migration.js'
+import { OrgService } from './services/org.js'
 import { buildSeed } from './seed.js'
 
 export async function createApp(options = {}) {
@@ -37,13 +38,17 @@ export async function createApp(options = {}) {
   const trade = new TradeService({ k, locks, audit, points, inventory, coupons, ship, tasks, risk, budget })
   const recon = new ReconService({ k, audit, points, coupons })
   const migration = new MigrationService({ k, audit })
+  const org = new OrgService(k, audit)
 
-  const app = { k, locks, auth, audit, points, inventory, coupons, ship, purchase, supplier, budget, tasks, risk, trade, recon, migration }
+  const app = { k, locks, auth, audit, points, inventory, coupons, ship, purchase, supplier, budget, tasks, risk, trade, recon, migration, org }
 
   // 空库引导：写入原生种子（以 upsert/insert 事件入 WAL，重启自动恢复）
   const fresh = k.state.tenants.length === 0 && k.state.activities.length === 0
   if (fresh && options.seed !== false) {
     await seedFresh(k)
+  } else if (fresh && options.seed === false && options.bootstrapPlatform !== false) {
+    // 空库迁移模式（--no-seed）：仅引导平台骨架（超管账号），业务台账等待离线快照迁移上云
+    await seedPlatformSkeleton(k)
   }
 
   // 启动续办：崩溃后重放 WAL，把 processing 的交易/审核单执行到终态（幂等无重复副作用）。
@@ -59,6 +64,15 @@ export async function createApp(options = {}) {
   }
 
   return app
+}
+
+async function seedPlatformSkeleton(k) {
+  const seed = buildSeed()
+  const events = []
+  // 仅平台超管（无 tenantId）+ 空自定义角色，供离线快照迁移的 HTTP 登录鉴权；
+  // 租户/成员/业务数据全部由后续 /api/migration/run 重建。
+  seed.members.filter((m) => !m.tenantId).forEach((m) => events.push({ type: 'upsert', table: 'members', row: m }))
+  for (const e of events) await k.commit([e])
 }
 
 async function seedFresh(k) {
